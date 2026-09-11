@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -87,7 +86,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.screen, 1)
 
         buttons = QHBoxLayout()
-        for text, key in [("返回", "KEYCODE_BACK"), ("主页", "KEYCODE_HOME"), ("电源", "KEYCODE_POWER")]:
+        key_buttons = [
+            ("返回", "KEYCODE_BACK"),
+            ("主页", "KEYCODE_HOME"),
+            ("电源", "KEYCODE_POWER"),
+        ]
+        for text, key in key_buttons:
             btn = QPushButton(text)
             btn.clicked.connect(lambda _checked=False, k=key: self.send_key(k))
             buttons.addWidget(btn)
@@ -119,7 +123,8 @@ class MainWindow(QMainWindow):
         return self.devices.currentData() or ""
 
     def device_url(self, suffix: str) -> str:
-        return f"{self.base()}/api/v1/devices/{quote(self.serial(), safe='')}/{suffix}"
+        serial = quote(self.serial(), safe="")
+        return f"{self.base()}/api/v1/devices/{serial}/{suffix}"
 
     def refresh_devices(self) -> None:
         try:
@@ -156,8 +161,12 @@ class MainWindow(QMainWindow):
             if size and "x" in size:
                 w, h = size.split("x", 1)
                 self.device_size = (int(w), int(h))
+            manufacturer = info.get("manufacturer", "")
+            model = info.get("model", "")
+            android_version = info.get("android_version", "")
+            battery = info.get("battery_level", "?")
             self.status.setText(
-                f"{info.get('manufacturer', '')} {info.get('model', '')} | Android {info.get('android_version', '')} | 电量 {info.get('battery_level', '?')}%"
+                f"{manufacturer} {model} | Android {android_version} | 电量 {battery}%"
             )
         except Exception as exc:
             self.status.setText(f"读取设备信息失败: {exc}")
@@ -193,7 +202,10 @@ class MainWindow(QMainWindow):
         self.post("input/tap", {"x": x, "y": y})
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int) -> None:
-        self.post("input/swipe", {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": 300})
+        self.post(
+            "input/swipe",
+            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": 300},
+        )
 
     def send_key(self, keycode: str) -> None:
         self.post("input/key", {"keycode": keycode})
