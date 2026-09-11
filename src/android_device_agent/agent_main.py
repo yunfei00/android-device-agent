@@ -4,7 +4,7 @@ import argparse
 
 import uvicorn
 
-from .api import create_app
+from android_device_agent.api import create_app
 
 app = create_app()
 
