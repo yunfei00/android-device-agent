@@ -29,7 +29,11 @@ class AdbClient:
     def available(self) -> bool:
         return shutil.which(self.executable) is not None
 
-    def _run_bytes(self, args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
+    def _run_bytes(
+        self,
+        args: list[str],
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
         cmd = [self.executable, *args]
         try:
             return subprocess.run(
@@ -62,7 +66,12 @@ class AdbClient:
             raise AdbError(result.stderr or "adb devices failed")
         return parse_devices(result.stdout)
 
-    def shell(self, serial: str, command: list[str], timeout: float | None = None) -> CommandResult:
+    def shell(
+        self,
+        serial: str,
+        command: list[str],
+        timeout: float | None = None,
+    ) -> CommandResult:
         if not serial:
             raise ValueError("serial is required")
         if not command:
@@ -72,7 +81,8 @@ class AdbClient:
     def screenshot(self, serial: str) -> bytes:
         cp = self._run_bytes(["-s", serial, "exec-out", "screencap", "-p"], timeout=15)
         if cp.returncode != 0:
-            raise AdbError(cp.stderr.decode("utf-8", errors="replace").strip() or "screenshot failed")
+            message = cp.stderr.decode("utf-8", errors="replace").strip()
+            raise AdbError(message or "screenshot failed")
         return cp.stdout
 
     def getprop(self, serial: str, name: str) -> str:
@@ -98,7 +108,7 @@ def parse_devices(output: str) -> list[dict[str, str]]:
     devices: list[dict[str, str]] = []
     for raw in output.splitlines():
         line = raw.strip()
-        if not line or line.startswith("List of devices") or line.startswith("*"):
+        if not line or line.startswith(("List of devices", "*")):
             continue
         parts = line.split()
         if len(parts) < 2:
