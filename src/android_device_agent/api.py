@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from fastapi import APIRouter, FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
@@ -45,7 +47,7 @@ def _shell_or_500(serial: str, command: list[str], timeout: float = 10.0) -> dic
         result = adb.shell(serial, command, timeout)
     except (AdbError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return result.__dict__
+    return asdict(result)
 
 
 @router.get("/devices")
@@ -105,7 +107,10 @@ def input_key(serial: str, payload: KeyRequest) -> dict:
 def app_start(serial: str, payload: AppRequest) -> dict:
     if payload.activity:
         return _shell_or_500(serial, ["am", "start", "-n", f"{payload.package}/{payload.activity}"])
-    return _shell_or_500(serial, ["monkey", "-p", payload.package, "-c", "android.intent.category.LAUNCHER", "1"])
+    return _shell_or_500(
+        serial,
+        ["monkey", "-p", payload.package, "-c", "android.intent.category.LAUNCHER", "1"],
+    )
 
 
 @router.post("/devices/{serial}/apps/stop")
@@ -119,7 +124,7 @@ def reboot(serial: str) -> dict:
         result = adb.run(["-s", serial, "reboot"], timeout=10)
     except AdbError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return result.__dict__
+    return asdict(result)
 
 
 @router.get("/devices/{serial}/screenshot")
