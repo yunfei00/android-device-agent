@@ -1,0 +1,61 @@
+name: build-and-release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --dev
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Pytest
+        run: uv run pytest -q
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --dev
+      - name: Build agent
+        run: uv run pyinstaller --noconfirm --clean --onefile --name android-device-agent --paths src src/android_device_agent/agent_main.py
+      - name: Build remote client
+        run: uv run pyinstaller --noconfirm --clean --onefile --windowed --name android-remote-client --paths src src/android_device_agent/client_main.py
+      - name: Create release package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package
+          Copy-Item dist/android-device-agent.exe package/
+          Copy-Item dist/android-remote-client.exe package/
+          Copy-Item README.md package/
+          Compress-Archive -Path package/* -DestinationPath android-device-agent-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-device-agent-windows-x64
+          path: android-device-agent-windows-x64.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: android-device-agent-windows-x64.zip
