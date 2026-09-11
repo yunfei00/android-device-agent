@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 
 class ScreenLabel(QLabel):
-    def __init__(self, owner: "MainWindow") -> None:
+    def __init__(self, owner: MainWindow) -> None:
         super().__init__()
         self.owner = owner
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -146,7 +146,7 @@ class MainWindow(QMainWindow):
                     self.devices.setCurrentIndex(idx)
             self.load_device_info()
             self.status.setText(f"发现 {len(items)} 台设备")
-        except Exception as exc:
+        except requests.RequestException as exc:
             self.status.setText(f"连接失败: {exc}")
 
     def load_device_info(self) -> None:
@@ -168,7 +168,7 @@ class MainWindow(QMainWindow):
             self.status.setText(
                 f"{manufacturer} {model} | Android {android_version} | 电量 {battery}%"
             )
-        except Exception as exc:
+        except (requests.RequestException, ValueError) as exc:
             self.status.setText(f"读取设备信息失败: {exc}")
 
     def refresh_screen(self) -> None:
@@ -177,17 +177,17 @@ class MainWindow(QMainWindow):
         try:
             response = self.session.get(self.device_url("screenshot"), timeout=2)
             response.raise_for_status()
-            pixmap = QPixmap()
-            if pixmap.loadFromData(response.content, "PNG"):
-                self.screen.setPixmap(
-                    pixmap.scaled(
-                        self.screen.size(),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
+        except requests.RequestException:
+            return
+        pixmap = QPixmap()
+        if pixmap.loadFromData(response.content, "PNG"):
+            self.screen.setPixmap(
+                pixmap.scaled(
+                    self.screen.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
-        except Exception:
-            pass
+            )
 
     def post(self, suffix: str, payload: dict) -> None:
         if not self.serial():
@@ -195,7 +195,7 @@ class MainWindow(QMainWindow):
         try:
             response = self.session.post(self.device_url(suffix), json=payload, timeout=3)
             response.raise_for_status()
-        except Exception as exc:
+        except requests.RequestException as exc:
             self.status.setText(f"操作失败: {exc}")
 
     def tap(self, x: int, y: int) -> None:
