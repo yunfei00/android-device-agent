@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 import av
@@ -21,26 +23,35 @@ from PySide6.QtWidgets import (
 
 
 class VideoThread(QThread):
-    frame_ready = Signal(QImage)
     stream_error = Signal(str)
 
     def __init__(self, url: str) -> None:
         super().__init__()
         self.url = url
         self._running = True
+        self._latest_lock = threading.Lock()
+        self._latest_image: QImage | None = None
 
     def stop(self) -> None:
-        # Do not close the requests response from another thread. urllib3 may be inside
-        # readline/read at that exact moment, which can turn response.raw into None and
-        # produce "AttributeError: NoneType object has no attribute readline".
         self._running = False
         self.requestInterruption()
+
+    def take_latest_frame(self) -> QImage | None:
+        with self._latest_lock:
+            image = self._latest_image
+            self._latest_image = None
+        return image
+
+    def _store_latest_frame(self, image: QImage) -> None:
+        # Keep only the newest decoded frame. Dropping stale frames is essential for
+        # interactive mirroring: rendering every decoded frame can build up a Qt event
+        # queue and make the displayed picture seconds behind the real phone state.
+        with self._latest_lock:
+            self._latest_image = image
 
     def run(self) -> None:
         codec = av.CodecContext.create("h264", "r")
         try:
-            # Keep a short connect timeout but do not impose a read timeout on a live
-            # video stream. Some devices take several seconds to emit the first SPS/IDR.
             with requests.get(self.url, stream=True, timeout=(3, None)) as response:
                 response.raise_for_status()
                 for chunk in response.iter_content(chunk_size=8 * 1024):
@@ -61,7 +72,7 @@ class VideoThread(QThread):
                                 plane.line_size,
                                 QImage.Format.Format_RGB888,
                             ).copy()
-                            self.frame_ready.emit(image)
+                            self._store_latest_frame(image)
         except (requests.RequestException, av.error.FFmpegError, OSError, AttributeError) as exc:
             if self._running and not self.isInterruptionRequested():
                 self.stream_error.emit(str(exc))
@@ -78,8 +89,10 @@ class ScreenLabel(QLabel):
 
     def _to_device(self, pos: QPoint) -> tuple[int, int] | None:
         pixmap = self.pixmap()
-        if pixmap is None or pixmap.isNull() or not self.owner.device_size:
+        physical_size = self.owner.physical_device_size
+        if pixmap is None or pixmap.isNull() or not physical_size:
             return None
+
         shown = pixmap.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
         ox = (self.width() - shown.width()) // 2
         oy = (self.height() - shown.height()) // 2
@@ -87,8 +100,14 @@ class ScreenLabel(QLabel):
         y = pos.y() - oy
         if x < 0 or y < 0 or x >= shown.width() or y >= shown.height():
             return None
-        dw, dh = self.owner.device_size
-        return int(x * dw / shown.width()), int(y * dh / shown.height())
+
+        # The H.264 stream may be downscaled (for example 576x1280), but Android input
+        # coordinates must always target the physical display size (for example
+        # 1080x2400). Map from the rendered video rectangle to the physical display.
+        dw, dh = physical_size
+        px = min(dw - 1, max(0, round(x * dw / shown.width())))
+        py = min(dh - 1, max(0, round(y * dh / shown.height())))
+        return px, py
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -102,7 +121,7 @@ class ScreenLabel(QLabel):
         self._press_pos = None
         if not start or not end:
             return
-        if abs(start[0] - end[0]) < 12 and abs(start[1] - end[1]) < 12:
+        if abs(start[0] - end[0]) < 18 and abs(start[1] - end[1]) < 18:
             self.owner.tap(*end)
         else:
             self.owner.swipe(*start, *end)
@@ -114,9 +133,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Android Remote Client")
         self.resize(720, 900)
         self.session = requests.Session()
-        self.device_size: tuple[int, int] | None = None
+        self.physical_device_size: tuple[int, int] | None = None
+        self.video_frame_size: tuple[int, int] | None = None
         self.video_thread: VideoThread | None = None
         self.video_active = False
+        self.input_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="remote-input")
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -159,6 +180,13 @@ class MainWindow(QMainWindow):
         self.status = QLabel("未连接")
         layout.addWidget(self.status)
         self.setCentralWidget(root)
+
+        # Draw at most the newest frame every ~16 ms. Old decoded frames are discarded
+        # rather than queued, which keeps display latency bounded.
+        self.video_render_timer = QTimer(self)
+        self.video_render_timer.setInterval(16)
+        self.video_render_timer.timeout.connect(self.render_latest_video_frame)
+        self.video_render_timer.start()
 
         self.fallback_timer = QTimer(self)
         self.fallback_timer.setInterval(500)
@@ -203,7 +231,8 @@ class MainWindow(QMainWindow):
     def load_device_info(self) -> None:
         self.stop_video_stream()
         if not self.serial():
-            self.device_size = None
+            self.physical_device_size = None
+            self.video_frame_size = None
             return
         try:
             response = self.session.get(self.device_url("info"), timeout=3)
@@ -212,7 +241,7 @@ class MainWindow(QMainWindow):
             size = info.get("screen_size")
             if size and "x" in size:
                 w, h = size.split("x", 1)
-                self.device_size = (int(w), int(h))
+                self.physical_device_size = (int(w), int(h))
             manufacturer = info.get("manufacturer", "")
             model = info.get("model", "")
             android_version = info.get("android_version", "")
@@ -229,7 +258,6 @@ class MainWindow(QMainWindow):
             return
         self.video_active = False
         thread = VideoThread(self.device_url("video/h264"))
-        thread.frame_ready.connect(self.on_video_frame)
         thread.stream_error.connect(self.on_video_error)
         self.video_thread = thread
         thread.start()
@@ -240,15 +268,21 @@ class MainWindow(QMainWindow):
         self.video_active = False
         if thread is not None:
             thread.stop()
-            # The stream is intentionally read-timeout free. Do not block the UI waiting
-            # forever; the worker exits when the next network chunk arrives.
             thread.wait(150)
 
-    def on_video_frame(self, image: QImage) -> None:
+    def render_latest_video_frame(self) -> None:
+        thread = self.video_thread
+        if thread is None:
+            return
+        image = thread.take_latest_frame()
+        if image is None:
+            return
         self.video_active = True
-        self.device_size = (image.width(), image.height())
+        self.video_frame_size = (image.width(), image.height())
         self.show_pixmap(QPixmap.fromImage(image))
-        self.status.setText(f"{self.serial()} | H.264低延迟投屏")
+        physical = self.physical_device_size
+        stream = self.video_frame_size
+        self.status.setText(f"{self.serial()} | H.264低延迟投屏 | 屏幕{physical} | 视频{stream}")
 
     def on_video_error(self, message: str) -> None:
         self.video_active = False
@@ -259,7 +293,7 @@ class MainWindow(QMainWindow):
             pixmap.scaled(
                 self.screen.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,
             )
         )
 
@@ -275,14 +309,20 @@ class MainWindow(QMainWindow):
         if pixmap.loadFromData(response.content, "PNG"):
             self.show_pixmap(pixmap)
 
+    def _post_now(self, url: str, payload: dict) -> None:
+        try:
+            response = requests.post(url, json=payload, timeout=2)
+            response.raise_for_status()
+        except requests.RequestException:
+            # Input is intentionally fire-and-forget so network latency never blocks the
+            # Qt render thread. Status reporting for controls can be added separately.
+            return
+
     def post(self, suffix: str, payload: dict) -> None:
         if not self.serial():
             return
-        try:
-            response = self.session.post(self.device_url(suffix), json=payload, timeout=2)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            self.status.setText(f"操作失败: {exc}")
+        url = self.device_url(suffix)
+        self.input_executor.submit(self._post_now, url, payload)
 
     def tap(self, x: int, y: int) -> None:
         self.post("input/tap", {"x": x, "y": y})
@@ -290,7 +330,7 @@ class MainWindow(QMainWindow):
     def swipe(self, x1: int, y1: int, x2: int, y2: int) -> None:
         self.post(
             "input/swipe",
-            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": 180},
+            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": 120},
         )
 
     def send_key(self, keycode: str) -> None:
@@ -304,6 +344,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.stop_video_stream()
+        self.input_executor.shutdown(wait=False, cancel_futures=True)
         event.accept()
 
 
