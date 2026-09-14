@@ -3,9 +3,10 @@ from __future__ import annotations
 import sys
 from urllib.parse import quote
 
+import av
 import requests
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QMouseEvent, QPixmap
+from PySide6.QtCore import QPoint, QThread, Qt, QTimer, Signal
+from PySide6.QtGui import QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,6 +18,53 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class VideoThread(QThread):
+    frame_ready = Signal(QImage)
+    stream_error = Signal(str)
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self.url = url
+        self._running = True
+        self._response: requests.Response | None = None
+
+    def stop(self) -> None:
+        self._running = False
+        if self._response is not None:
+            self._response.close()
+
+    def run(self) -> None:
+        codec = av.CodecContext.create("h264", "r")
+        try:
+            with requests.get(self.url, stream=True, timeout=(3, 5)) as response:
+                self._response = response
+                response.raise_for_status()
+                for chunk in response.iter_content(chunk_size=16 * 1024):
+                    if not self._running:
+                        return
+                    if not chunk:
+                        continue
+                    for packet in codec.parse(chunk):
+                        for frame in codec.decode(packet):
+                            if not self._running:
+                                return
+                            rgb = frame.reformat(format="rgb24")
+                            plane = rgb.planes[0]
+                            image = QImage(
+                                bytes(plane),
+                                rgb.width,
+                                rgb.height,
+                                plane.line_size,
+                                QImage.Format.Format_RGB888,
+                            ).copy()
+                            self.frame_ready.emit(image)
+        except (requests.RequestException, av.AVError, OSError) as exc:
+            if self._running:
+                self.stream_error.emit(str(exc))
+        finally:
+            self._response = None
 
 
 class ScreenLabel(QLabel):
@@ -67,6 +115,8 @@ class MainWindow(QMainWindow):
         self.resize(720, 900)
         self.session = requests.Session()
         self.device_size: tuple[int, int] | None = None
+        self.video_thread: VideoThread | None = None
+        self.video_active = False
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -110,10 +160,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status)
         self.setCentralWidget(root)
 
-        self.timer = QTimer(self)
-        self.timer.setInterval(250)
-        self.timer.timeout.connect(self.refresh_screen)
-        self.timer.start()
+        self.fallback_timer = QTimer(self)
+        self.fallback_timer.setInterval(500)
+        self.fallback_timer.timeout.connect(self.refresh_screen_fallback)
+        self.fallback_timer.start()
         self.devices.currentIndexChanged.connect(self.load_device_info)
 
     def base(self) -> str:
@@ -150,6 +200,7 @@ class MainWindow(QMainWindow):
             self.status.setText(f"连接失败: {exc}")
 
     def load_device_info(self) -> None:
+        self.stop_video_stream()
         if not self.serial():
             self.device_size = None
             return
@@ -166,13 +217,51 @@ class MainWindow(QMainWindow):
             android_version = info.get("android_version", "")
             battery = info.get("battery_level", "?")
             self.status.setText(
-                f"{manufacturer} {model} | Android {android_version} | 电量 {battery}%"
+                f"{manufacturer} {model} | Android {android_version} | 电量 {battery}% | 正在连接H.264"
             )
+            self.start_video_stream()
         except (requests.RequestException, ValueError) as exc:
             self.status.setText(f"读取设备信息失败: {exc}")
 
-    def refresh_screen(self) -> None:
+    def start_video_stream(self) -> None:
         if not self.serial():
+            return
+        self.video_active = False
+        thread = VideoThread(self.device_url("video/h264"))
+        thread.frame_ready.connect(self.on_video_frame)
+        thread.stream_error.connect(self.on_video_error)
+        self.video_thread = thread
+        thread.start()
+
+    def stop_video_stream(self) -> None:
+        thread = self.video_thread
+        self.video_thread = None
+        self.video_active = False
+        if thread is not None:
+            thread.stop()
+            thread.wait(1000)
+
+    def on_video_frame(self, image: QImage) -> None:
+        self.video_active = True
+        self.device_size = (image.width(), image.height())
+        self.show_pixmap(QPixmap.fromImage(image))
+        self.status.setText(f"{self.serial()} | H.264低延迟投屏")
+
+    def on_video_error(self, message: str) -> None:
+        self.video_active = False
+        self.status.setText(f"H.264不可用，已回退截图模式: {message}")
+
+    def show_pixmap(self, pixmap: QPixmap) -> None:
+        self.screen.setPixmap(
+            pixmap.scaled(
+                self.screen.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def refresh_screen_fallback(self) -> None:
+        if self.video_active or not self.serial():
             return
         try:
             response = self.session.get(self.device_url("screenshot"), timeout=2)
@@ -181,19 +270,13 @@ class MainWindow(QMainWindow):
             return
         pixmap = QPixmap()
         if pixmap.loadFromData(response.content, "PNG"):
-            self.screen.setPixmap(
-                pixmap.scaled(
-                    self.screen.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            self.show_pixmap(pixmap)
 
     def post(self, suffix: str, payload: dict) -> None:
         if not self.serial():
             return
         try:
-            response = self.session.post(self.device_url(suffix), json=payload, timeout=3)
+            response = self.session.post(self.device_url(suffix), json=payload, timeout=2)
             response.raise_for_status()
         except requests.RequestException as exc:
             self.status.setText(f"操作失败: {exc}")
@@ -204,7 +287,7 @@ class MainWindow(QMainWindow):
     def swipe(self, x1: int, y1: int, x2: int, y2: int) -> None:
         self.post(
             "input/swipe",
-            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": 300},
+            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": 180},
         )
 
     def send_key(self, keycode: str) -> None:
@@ -215,6 +298,10 @@ class MainWindow(QMainWindow):
         if text:
             self.post("input/text", {"text": text})
             self.text_input.clear()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_video_stream()
+        event.accept()
 
 
 def main() -> None:
