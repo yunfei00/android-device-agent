@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import APIRouter, FastAPI, HTTPException, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -87,10 +87,7 @@ def shell(serial: str, payload: ShellRequest) -> dict:
 
 @router.post("/devices/{serial}/input/tap")
 def tap(serial: str, payload: TapRequest) -> dict:
-    return _fast_input_or_500(
-        "tap",
-        lambda: fast_input.tap(serial, payload.x, payload.y),
-    )
+    return _fast_input_or_500("tap", lambda: fast_input.tap(serial, payload.x, payload.y))
 
 
 @router.post("/devices/{serial}/input/swipe")
@@ -153,17 +150,27 @@ def screenshot(serial: str) -> Response:
 
 
 @router.get("/devices/{serial}/video/capabilities")
-def video_capabilities(serial: str) -> dict:
+def video_capabilities(
+    serial: str,
+    quality: str = Query(default="balanced"),
+) -> dict:
     try:
-        return video_streamer.preflight(serial)
+        return video_streamer.preflight(serial, quality)
     except VideoStreamError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/devices/{serial}/video/h264")
-def video_h264(serial: str) -> StreamingResponse:
+def video_h264(
+    serial: str,
+    quality: str = Query(default="balanced"),
+) -> StreamingResponse:
+    try:
+        stream = video_streamer.stream(serial, quality)
+    except VideoStreamError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return StreamingResponse(
-        video_streamer.stream(serial),
+        stream,
         media_type="video/H264",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -179,16 +186,17 @@ async def lifespan(_app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Android Device Agent", version="0.2.1", lifespan=lifespan)
+    app = FastAPI(title="Android Device Agent", version="0.3.0", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict:
         return {
             "status": "ok",
-            "version": "0.2.1",
+            "version": "0.3.0",
             "adb_available": adb.available,
             "input_mode": "persistent-adb-shell",
-            "video_mode": "h264-stream-with-screenshot-fallback",
+            "video_mode": "selectable-h264-quality-with-screenshot-fallback",
+            "video_qualities": ["smooth", "balanced", "high", "native"],
         }
 
     app.include_router(router)
