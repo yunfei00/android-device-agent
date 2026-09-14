@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from .adb import AdbClient, AdbError
 from .fast_input import FastInputError, FastInputManager
-from .video_stream import AdbH264Streamer
+from .video_stream import AdbH264Streamer, VideoStreamError
 
 adb = AdbClient()
 fast_input = FastInputManager()
@@ -152,6 +152,14 @@ def screenshot(serial: str) -> Response:
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+@router.get("/devices/{serial}/video/capabilities")
+def video_capabilities(serial: str) -> dict:
+    try:
+        return video_streamer.preflight(serial)
+    except VideoStreamError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/devices/{serial}/video/h264")
 def video_h264(serial: str) -> StreamingResponse:
     return StreamingResponse(
@@ -171,12 +179,13 @@ async def lifespan(_app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Android Device Agent", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Android Device Agent", version="0.2.1", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict:
         return {
             "status": "ok",
+            "version": "0.2.1",
             "adb_available": adb.available,
             "input_mode": "persistent-adb-shell",
             "video_mode": "h264-stream-with-screenshot-fallback",
