@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 import uvicorn
@@ -12,11 +11,6 @@ app = create_app()
 
 
 def _configure_console() -> None:
-    if os.name == "nt":
-        try:
-            os.system("chcp 65001 > nul")
-        except OSError:
-            pass
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
