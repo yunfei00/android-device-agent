@@ -28,7 +28,7 @@ class AdbH264Streamer:
                 if process.stdout is None:
                     raise VideoStreamError("screenrecord stdout is unavailable")
                 while True:
-                    chunk = process.stdout.read(64 * 1024)
+                    chunk = process.stdout.read1(16 * 1024)
                     if not chunk:
                         break
                     yield chunk
