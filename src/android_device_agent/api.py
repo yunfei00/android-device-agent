@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from fastapi import APIRouter, FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .adb import AdbClient, AdbError
+from .fast_input import FastInputError, FastInputManager
+from .video_stream import AdbH264Streamer
 
 adb = AdbClient()
+fast_input = FastInputManager()
+video_streamer = AdbH264Streamer()
 router = APIRouter(prefix="/api/v1")
 
 
@@ -26,7 +32,7 @@ class SwipeRequest(BaseModel):
     y1: int = Field(ge=0)
     x2: int = Field(ge=0)
     y2: int = Field(ge=0)
-    duration_ms: int = Field(default=300, ge=1, le=10000)
+    duration_ms: int = Field(default=180, ge=1, le=10000)
 
 
 class TextRequest(BaseModel):
@@ -48,6 +54,14 @@ def _shell_or_500(serial: str, command: list[str], timeout: float = 10.0) -> dic
     except (AdbError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return asdict(result)
+
+
+def _fast_input_or_500(action: str, callback: object) -> dict:
+    try:
+        callback()
+    except (FastInputError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"success": True, "mode": "persistent-adb-shell", "action": action}
 
 
 @router.get("/devices")
@@ -73,34 +87,35 @@ def shell(serial: str, payload: ShellRequest) -> dict:
 
 @router.post("/devices/{serial}/input/tap")
 def tap(serial: str, payload: TapRequest) -> dict:
-    return _shell_or_500(serial, ["input", "tap", str(payload.x), str(payload.y)])
+    return _fast_input_or_500(
+        "tap",
+        lambda: fast_input.tap(serial, payload.x, payload.y),
+    )
 
 
 @router.post("/devices/{serial}/input/swipe")
 def swipe(serial: str, payload: SwipeRequest) -> dict:
-    return _shell_or_500(
-        serial,
-        [
-            "input",
-            "swipe",
-            str(payload.x1),
-            str(payload.y1),
-            str(payload.x2),
-            str(payload.y2),
-            str(payload.duration_ms),
-        ],
+    return _fast_input_or_500(
+        "swipe",
+        lambda: fast_input.swipe(
+            serial,
+            payload.x1,
+            payload.y1,
+            payload.x2,
+            payload.y2,
+            payload.duration_ms,
+        ),
     )
 
 
 @router.post("/devices/{serial}/input/text")
 def input_text(serial: str, payload: TextRequest) -> dict:
-    safe_text = payload.text.replace(" ", "%s")
-    return _shell_or_500(serial, ["input", "text", safe_text])
+    return _fast_input_or_500("text", lambda: fast_input.text(serial, payload.text))
 
 
 @router.post("/devices/{serial}/input/key")
 def input_key(serial: str, payload: KeyRequest) -> dict:
-    return _shell_or_500(serial, ["input", "keyevent", payload.keycode])
+    return _fast_input_or_500("key", lambda: fast_input.key(serial, payload.keycode))
 
 
 @router.post("/devices/{serial}/apps/start")
@@ -120,6 +135,7 @@ def app_stop(serial: str, payload: AppRequest) -> dict:
 
 @router.post("/devices/{serial}/reboot")
 def reboot(serial: str) -> dict:
+    fast_input.close(serial)
     try:
         result = adb.run(["-s", serial, "reboot"], timeout=10)
     except AdbError as exc:
@@ -136,12 +152,35 @@ def screenshot(serial: str) -> Response:
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+@router.get("/devices/{serial}/video/h264")
+def video_h264(serial: str) -> StreamingResponse:
+    return StreamingResponse(
+        video_streamer.stream(serial),
+        media_type="video/H264",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    fast_input.close_all()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Android Device Agent", version="0.1.0")
+    app = FastAPI(title="Android Device Agent", version="0.2.0", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "adb_available": adb.available}
+        return {
+            "status": "ok",
+            "adb_available": adb.available,
+            "input_mode": "persistent-adb-shell",
+            "video_mode": "h264-stream-with-screenshot-fallback",
+        }
 
     app.include_router(router)
     return app
