@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+QUALITY_OPTIONS = [
+    ("流畅 1280 / 2.5M", "smooth"),
+    ("平衡 1600 / 4M", "balanced"),
+    ("高清 1920 / 6M", "high"),
+    ("原生 / 8M", "native"),
+]
+
 
 class VideoThread(QThread):
     stream_error = Signal(str)
@@ -43,9 +50,6 @@ class VideoThread(QThread):
         return image
 
     def _store_latest_frame(self, image: QImage) -> None:
-        # Keep only the newest decoded frame. Dropping stale frames is essential for
-        # interactive mirroring: rendering every decoded frame can build up a Qt event
-        # queue and make the displayed picture seconds behind the real phone state.
         with self._latest_lock:
             self._latest_image = image
 
@@ -92,7 +96,6 @@ class ScreenLabel(QLabel):
         physical_size = self.owner.physical_device_size
         if pixmap is None or pixmap.isNull() or not physical_size:
             return None
-
         shown = pixmap.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
         ox = (self.width() - shown.width()) // 2
         oy = (self.height() - shown.height()) // 2
@@ -100,10 +103,6 @@ class ScreenLabel(QLabel):
         y = pos.y() - oy
         if x < 0 or y < 0 or x >= shown.width() or y >= shown.height():
             return None
-
-        # The H.264 stream may be downscaled (for example 576x1280), but Android input
-        # coordinates must always target the physical display size (for example
-        # 1080x2400). Map from the rendered video rectangle to the physical display.
         dw, dh = physical_size
         px = min(dw - 1, max(0, round(x * dw / shown.width())))
         py = min(dh - 1, max(0, round(y * dh / shown.height())))
@@ -153,16 +152,26 @@ class MainWindow(QMainWindow):
         top.addWidget(refresh)
         layout.addLayout(top)
 
+        quality_row = QHBoxLayout()
+        quality_row.addWidget(QLabel("画质:"))
+        self.quality = QComboBox()
+        for label, value in QUALITY_OPTIONS:
+            self.quality.addItem(label, value)
+        self.quality.setCurrentIndex(1)
+        self.quality.currentIndexChanged.connect(self.change_quality)
+        quality_row.addWidget(self.quality)
+        quality_row.addStretch(1)
+        layout.addLayout(quality_row)
+
         self.screen = ScreenLabel(self)
         layout.addWidget(self.screen, 1)
 
         buttons = QHBoxLayout()
-        key_buttons = [
+        for text, key in [
             ("返回", "KEYCODE_BACK"),
             ("主页", "KEYCODE_HOME"),
             ("电源", "KEYCODE_POWER"),
-        ]
-        for text, key in key_buttons:
+        ]:
             btn = QPushButton(text)
             btn.clicked.connect(lambda _checked=False, k=key: self.send_key(k))
             buttons.addWidget(btn)
@@ -181,8 +190,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status)
         self.setCentralWidget(root)
 
-        # Draw at most the newest frame every ~16 ms. Old decoded frames are discarded
-        # rather than queued, which keeps display latency bounded.
         self.video_render_timer = QTimer(self)
         self.video_render_timer.setInterval(16)
         self.video_render_timer.timeout.connect(self.render_latest_video_frame)
@@ -199,6 +206,9 @@ class MainWindow(QMainWindow):
 
     def serial(self) -> str:
         return self.devices.currentData() or ""
+
+    def quality_name(self) -> str:
+        return self.quality.currentData() or "balanced"
 
     def device_url(self, suffix: str) -> str:
         serial = quote(self.serial(), safe="")
@@ -253,11 +263,19 @@ class MainWindow(QMainWindow):
         except (requests.RequestException, ValueError) as exc:
             self.status.setText(f"读取设备信息失败: {exc}")
 
+    def change_quality(self) -> None:
+        if not self.serial():
+            return
+        self.status.setText(f"正在切换画质: {self.quality.currentText()}")
+        self.stop_video_stream()
+        self.start_video_stream()
+
     def start_video_stream(self) -> None:
         if not self.serial():
             return
         self.video_active = False
-        thread = VideoThread(self.device_url("video/h264"))
+        quality = quote(self.quality_name(), safe="")
+        thread = VideoThread(f"{self.device_url('video/h264')}?quality={quality}")
         thread.stream_error.connect(self.on_video_error)
         self.video_thread = thread
         thread.start()
@@ -280,9 +298,10 @@ class MainWindow(QMainWindow):
         self.video_active = True
         self.video_frame_size = (image.width(), image.height())
         self.show_pixmap(QPixmap.fromImage(image))
-        physical = self.physical_device_size
-        stream = self.video_frame_size
-        self.status.setText(f"{self.serial()} | H.264低延迟投屏 | 屏幕{physical} | 视频{stream}")
+        self.status.setText(
+            f"{self.serial()} | {self.quality.currentText()} | "
+            f"屏幕{self.physical_device_size} | 视频{self.video_frame_size}"
+        )
 
     def on_video_error(self, message: str) -> None:
         self.video_active = False
@@ -293,7 +312,7 @@ class MainWindow(QMainWindow):
             pixmap.scaled(
                 self.screen.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
+                Qt.TransformationMode.SmoothTransformation,
             )
         )
 
@@ -314,15 +333,12 @@ class MainWindow(QMainWindow):
             response = requests.post(url, json=payload, timeout=2)
             response.raise_for_status()
         except requests.RequestException:
-            # Input is intentionally fire-and-forget so network latency never blocks the
-            # Qt render thread. Status reporting for controls can be added separately.
             return
 
     def post(self, suffix: str, payload: dict) -> None:
         if not self.serial():
             return
-        url = self.device_url(suffix)
-        self.input_executor.submit(self._post_now, url, payload)
+        self.input_executor.submit(self._post_now, self.device_url(suffix), payload)
 
     def tap(self, x: int, y: int) -> None:
         self.post("input/tap", {"x": x, "y": y})
