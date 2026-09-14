@@ -39,7 +39,7 @@ jobs:
       - name: Build agent
         run: uv run pyinstaller --noconfirm --clean --onefile --name android-device-agent --paths src src/android_device_agent/agent_main.py
       - name: Build remote client
-        run: uv run pyinstaller --noconfirm --clean --onefile --windowed --name android-remote-client --paths src src/android_device_agent/client_main.py
+        run: uv run pyinstaller --noconfirm --clean --onefile --windowed --collect-all av --name android-remote-client --paths src src/android_device_agent/client_main.py
       - name: Create release package
         shell: pwsh
         run: |
