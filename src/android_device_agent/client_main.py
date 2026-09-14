@@ -25,8 +25,15 @@ QUALITY_OPTIONS = [
     ("流畅 1280 / 2.5M", "smooth"),
     ("平衡 1600 / 4M", "balanced"),
     ("高清 1920 / 6M", "high"),
-    ("原生 / 8M", "native"),
+    ("原生 / 8M（高负载）", "native"),
 ]
+
+RENDER_INTERVAL_MS = {
+    "smooth": 16,
+    "balanced": 20,
+    "high": 33,
+    "native": 50,
+}
 
 
 class VideoThread(QThread):
@@ -77,7 +84,13 @@ class VideoThread(QThread):
                                 QImage.Format.Format_RGB888,
                             ).copy()
                             self._store_latest_frame(image)
-        except (requests.RequestException, av.error.FFmpegError, OSError, AttributeError) as exc:
+        except (
+            requests.RequestException,
+            av.error.FFmpegError,
+            OSError,
+            AttributeError,
+            MemoryError,
+        ) as exc:
             if self._running and not self.isInterruptionRequested():
                 self.stream_error.emit(str(exc))
 
@@ -135,6 +148,7 @@ class MainWindow(QMainWindow):
         self.physical_device_size: tuple[int, int] | None = None
         self.video_frame_size: tuple[int, int] | None = None
         self.video_thread: VideoThread | None = None
+        self.retired_video_threads: list[VideoThread] = []
         self.video_active = False
         self.input_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="remote-input")
 
@@ -191,7 +205,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         self.video_render_timer = QTimer(self)
-        self.video_render_timer.setInterval(16)
+        self.video_render_timer.setInterval(RENDER_INTERVAL_MS["balanced"])
         self.video_render_timer.timeout.connect(self.render_latest_video_frame)
         self.video_render_timer.start()
 
@@ -266,6 +280,7 @@ class MainWindow(QMainWindow):
     def change_quality(self) -> None:
         if not self.serial():
             return
+        self.video_render_timer.setInterval(RENDER_INTERVAL_MS[self.quality_name()])
         self.status.setText(f"正在切换画质: {self.quality.currentText()}")
         self.stop_video_stream()
         self.start_video_stream()
@@ -277,6 +292,7 @@ class MainWindow(QMainWindow):
         quality = quote(self.quality_name(), safe="")
         thread = VideoThread(f"{self.device_url('video/h264')}?quality={quality}")
         thread.stream_error.connect(self.on_video_error)
+        thread.finished.connect(lambda t=thread: self.cleanup_video_thread(t))
         self.video_thread = thread
         thread.start()
 
@@ -286,7 +302,16 @@ class MainWindow(QMainWindow):
         self.video_active = False
         if thread is not None:
             thread.stop()
-            thread.wait(150)
+            if thread.isRunning() and thread not in self.retired_video_threads:
+                # Keep a strong reference until QThread really finishes. Dropping the last
+                # reference to a running QThread can make Qt terminate the whole process.
+                self.retired_video_threads.append(thread)
+
+    def cleanup_video_thread(self, thread: VideoThread) -> None:
+        if thread in self.retired_video_threads:
+            self.retired_video_threads.remove(thread)
+        if self.video_thread is thread and not thread.isRunning():
+            self.video_thread = None
 
     def render_latest_video_frame(self) -> None:
         thread = self.video_thread
@@ -305,6 +330,13 @@ class MainWindow(QMainWindow):
 
     def on_video_error(self, message: str) -> None:
         self.video_active = False
+        current = self.quality_name()
+        if current in {"high", "native"}:
+            balanced_index = self.quality.findData("balanced")
+            if balanced_index >= 0:
+                self.status.setText(f"高画质流异常，正在回退平衡模式: {message}")
+                self.quality.setCurrentIndex(balanced_index)
+                return
         self.status.setText(f"H.264不可用，已回退截图模式: {message}")
 
     def show_pixmap(self, pixmap: QPixmap) -> None:
@@ -360,6 +392,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.stop_video_stream()
+        all_threads = list(self.retired_video_threads)
+        if self.video_thread is not None:
+            all_threads.append(self.video_thread)
+        for thread in all_threads:
+            thread.stop()
+        for thread in all_threads:
+            thread.wait(2000)
         self.input_executor.shutdown(wait=False, cancel_futures=True)
         event.accept()
 
