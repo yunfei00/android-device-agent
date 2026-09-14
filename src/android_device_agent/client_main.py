@@ -28,27 +28,29 @@ class VideoThread(QThread):
         super().__init__()
         self.url = url
         self._running = True
-        self._response: requests.Response | None = None
 
     def stop(self) -> None:
+        # Do not close the requests response from another thread. urllib3 may be inside
+        # readline/read at that exact moment, which can turn response.raw into None and
+        # produce "AttributeError: NoneType object has no attribute readline".
         self._running = False
-        if self._response is not None:
-            self._response.close()
+        self.requestInterruption()
 
     def run(self) -> None:
         codec = av.CodecContext.create("h264", "r")
         try:
-            with requests.get(self.url, stream=True, timeout=(3, 5)) as response:
-                self._response = response
+            # Keep a short connect timeout but do not impose a read timeout on a live
+            # video stream. Some devices take several seconds to emit the first SPS/IDR.
+            with requests.get(self.url, stream=True, timeout=(3, None)) as response:
                 response.raise_for_status()
-                for chunk in response.iter_content(chunk_size=16 * 1024):
-                    if not self._running:
+                for chunk in response.iter_content(chunk_size=8 * 1024):
+                    if not self._running or self.isInterruptionRequested():
                         return
                     if not chunk:
                         continue
                     for packet in codec.parse(chunk):
                         for frame in codec.decode(packet):
-                            if not self._running:
+                            if not self._running or self.isInterruptionRequested():
                                 return
                             rgb = frame.reformat(format="rgb24")
                             plane = rgb.planes[0]
@@ -60,11 +62,9 @@ class VideoThread(QThread):
                                 QImage.Format.Format_RGB888,
                             ).copy()
                             self.frame_ready.emit(image)
-        except (requests.RequestException, av.error.FFmpegError, OSError) as exc:
-            if self._running:
+        except (requests.RequestException, av.error.FFmpegError, OSError, AttributeError) as exc:
+            if self._running and not self.isInterruptionRequested():
                 self.stream_error.emit(str(exc))
-        finally:
-            self._response = None
 
 
 class ScreenLabel(QLabel):
@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
             response.raise_for_status()
             items = response.json().get("devices", [])
             current = self.serial()
+            self.stop_video_stream()
             self.devices.blockSignals(True)
             self.devices.clear()
             for item in items:
@@ -189,11 +190,11 @@ class MainWindow(QMainWindow):
                 model = item.get("model", "")
                 state = item.get("state", "")
                 self.devices.addItem(f"{model or 'Android'} | {serial} | {state}", serial)
-            self.devices.blockSignals(False)
             if current:
                 idx = self.devices.findData(current)
                 if idx >= 0:
                     self.devices.setCurrentIndex(idx)
+            self.devices.blockSignals(False)
             self.load_device_info()
             self.status.setText(f"发现 {len(items)} 台设备")
         except requests.RequestException as exc:
@@ -239,7 +240,9 @@ class MainWindow(QMainWindow):
         self.video_active = False
         if thread is not None:
             thread.stop()
-            thread.wait(1000)
+            # The stream is intentionally read-timeout free. Do not block the UI waiting
+            # forever; the worker exits when the next network chunk arrives.
+            thread.wait(150)
 
     def on_video_frame(self, image: QImage) -> None:
         self.video_active = True
