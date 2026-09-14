@@ -1,134 +1,162 @@
 # Android Device Agent
 
-用于实验室环境的 Android 手机远程控制工具。手机连接在 Agent 电脑上，远端电脑通过局域网选择 ADB `serial`，查看屏幕并执行点击、滑动、按键、文字输入、App 控制等操作。
+Android Device Agent 是面向实验室环境的 Android 手机远程投屏与控制工具。
 
-## V0.2 功能
+手机通过 USB/ADB 连接 Agent 电脑，远端电脑通过局域网连接 Agent，按 ADB `serial` 选择设备，实现实时画面、点击、滑动、按键、文字输入和基础设备控制。
 
-- `adb devices -l` 设备发现
-- ADB `serial` 作为唯一设备 ID
-- 多设备选择与控制
-- 查询设备型号、Android 版本、电量、屏幕尺寸
+> 当前首个正式发布版本：**v0.2.0**
+
+## v0.2.0 功能
+
+- `adb devices -l` 自动发现设备
+- ADB `serial` 作为唯一设备 ID，支持多设备选择
+- 查询型号、Android 版本、电量和真实屏幕尺寸
 - 远程 ADB shell
-- 点击、滑动、文字输入、Home / Back / Power
+- 鼠标点击、拖动滑动、文字输入
+- Home / Back / Power
 - App 启动 / 停止、设备重启
-- PNG 截图接口
-- H.264 持续视频流接口
-- PyAV 实时 H.264 解码显示
-- H.264 不可用时自动回退 PNG 截图模式
-- 每个 serial 维护持久 ADB shell，降低输入控制延迟
-- Windows PySide6 远程客户端
-- GitHub Actions 自动测试和 Windows 打包
-- `v*` tag 自动创建 GitHub Release
+- PNG 截图接口与截图模式回退
+- H.264 持续视频流
+- PyAV 实时 H.264 解码
+- H.264 不可用时自动回退截图模式
+- H.264 画面只显示最新帧，避免旧帧排队造成额外延迟
+- 触控坐标始终映射到手机真实物理分辨率，视频缩放不影响点击位置
+- 每个 serial 使用持久 ADB shell，减少输入命令进程启动开销
+- 点击/滑动异步发送，避免阻塞客户端 UI
+- Windows PySide6 Remote Client
+- Windows Agent 控制台 UTF-8 输出并关闭 ANSI 彩色控制字符
+- GitHub Actions 自动测试、Windows 打包和 Tag Release
 
-## V0.2 低延迟链路
+## 架构
 
 ```text
-Android 手机
-   | USB / ADB
-   v
-Agent 电脑
-   |-- persistent adb shell  ---> 点击 / 滑动 / 按键
-   |-- screenrecord H.264     ---> 持续视频流
-   |
-   +---------- LAN -----------> Remote Client
-                                  |
-                                  +-- PyAV 实时解码
-                                  +-- 鼠标映射手机坐标
+Remote Client（电脑 A）
+        |
+        | LAN / HTTP + H.264
+        v
+Android Device Agent（电脑 B）
+        |
+        | USB / ADB
+        v
+Android 手机（serial 唯一标识）
 ```
 
-旧版 V0.1 每次画面刷新都执行 `adb exec-out screencap -p`，每次输入也会创建新的 `adb shell` 子进程。V0.2 默认改为持续 H.264 流和持久 ADB shell，以降低画面反馈和操作延迟。
+当前 v0.2.0 使用 `screenrecord` H.264 持续视频流和持久 ADB shell。它已经可以满足实验室远程查看与基础控制，但操作延迟仍有继续优化空间，后续计划评估 scrcpy server 原生 video/control socket。
 
-如果设备 ROM 不支持 `screenrecord --output-format=h264 -`，客户端会自动继续使用 PNG 截图模式，不影响基本远程控制。
+## 运行要求
 
-## 开发环境
-
-要求：
+源码运行：
 
 - Python 3.11+
 - uv
 - Android Platform Tools (`adb`)
 
-安装：
+Release 软件包运行：
 
-```bash
-uv sync --dev
-```
+- Windows x64
+- Android Platform Tools (`adb`) 已安装并可在命令行直接执行
+- Agent 电脑与 Remote Client 电脑网络互通
 
-确认手机：
+首先确认手机：
 
 ```bash
 adb devices -l
 ```
 
+## 源码安装
+
+```bash
+git clone git@github.com:yunfei00/android-device-agent.git
+cd android-device-agent
+uv sync --dev
+```
+
 ## 启动 Agent
+
+电脑 B（手机通过 USB 连接到这台电脑）：
 
 ```bash
 uv run android-device-agent --host 0.0.0.0 --port 18080
 ```
 
-检查：
+Release 包则直接运行：
+
+```text
+android-device-agent.exe
+```
+
+默认监听 TCP 18080。
+
+检查服务：
 
 ```bash
 curl http://127.0.0.1:18080/health
 curl http://127.0.0.1:18080/api/v1/devices
 ```
 
-V0.2 `/health` 应看到：
+Agent 电脑需要允许 Windows 防火墙访问 TCP 18080。该工具仅建议用于可信实验室/局域网，**不要直接暴露到公网**。
 
-```json
-{
-  "status": "ok",
-  "adb_available": true,
-  "input_mode": "persistent-adb-shell",
-  "video_mode": "h264-stream-with-screenshot-fallback"
-}
-```
+## 启动 Remote Client
 
-Agent 电脑需要允许 Windows 防火墙放行 TCP 18080。只建议用于可信实验室/局域网，不要直接暴露到公网。
-
-## 启动远程客户端
+源码：
 
 ```bash
 uv run android-remote-client
 ```
 
-客户端中填写 Agent 地址，例如：
+Release 包：
+
+```text
+android-remote-client.exe
+```
+
+客户端填写 Agent 地址，例如：
 
 ```text
 http://192.168.1.100:18080
 ```
 
-点击“刷新设备”，选择目标设备号。状态栏出现：
+然后：
+
+1. 点击“刷新设备”
+2. 按设备型号和 serial 选择目标手机
+3. 等待实时画面出现
+4. 直接在手机画面上点击或拖动
+
+状态栏显示：
 
 ```text
-<serial> | H.264低延迟投屏
+<serial> | H.264低延迟投屏 | 屏幕(...) | 视频(...)
 ```
 
-表示已经进入 V0.2 视频通道。
+表示 H.264 通道已建立。其中“屏幕”是真实手机触控分辨率，“视频”是传输/显示分辨率，两者可以不同。
 
-如果状态栏显示：
+如果显示：
 
 ```text
 H.264不可用，已回退截图模式
 ```
 
-说明当前手机/ROM 的 `screenrecord` H.264 stdout 模式不可用，但控制和截图模式仍可使用。
+说明当前手机/ROM 无法使用该 H.264 输出方式，客户端会继续使用 PNG 截图模式完成基本控制。
 
-远程操作：
-
-- 鼠标单击：手机点击
-- 鼠标拖动：手机滑动
-- 返回
-- 主页
-- 电源键
-- 发送文本
-
-## API
+## API 示例
 
 查看设备：
 
 ```text
 GET /api/v1/devices
+```
+
+设备信息：
+
+```text
+GET /api/v1/devices/{serial}/info
+```
+
+H.264 能力：
+
+```text
+GET /api/v1/devices/{serial}/video/capabilities
 ```
 
 H.264 视频流：
@@ -137,7 +165,7 @@ H.264 视频流：
 GET /api/v1/devices/{serial}/video/h264
 ```
 
-截图回退：
+截图：
 
 ```text
 GET /api/v1/devices/{serial}/screenshot
@@ -157,36 +185,54 @@ POST /api/v1/devices/{serial}/input/swipe
 {"x1": 500, "y1": 1500, "x2": 500, "y2": 500, "duration_ms": 180}
 ```
 
-执行 shell：
+Shell：
 
 ```text
 POST /api/v1/devices/{serial}/shell
 {"command": ["getprop", "ro.product.model"], "timeout": 10}
 ```
 
+## v0.2.0 已验证
+
+目前实际验证通过：
+
+- Agent 可发现 ADB 手机
+- Remote Client 可发现远端 Agent
+- Remote Client 可查看手机实时画面
+- H.264 投屏链路可进入工作状态
+- 鼠标点击可控制手机
+- 鼠标拖动可控制手机滑动
+- 刷新设备不会再触发 `NoneType ... readline` 异常
+- Agent 控制台异常前缀/乱码已修复
+- H.264 视频缩放与真实触控坐标已经分离
+
+当前已知限制：操作与画面反馈仍存在一定延迟，v0.2.0 暂接受当前效果，后续版本继续优化低延迟控制链路。
+
 ## 自动构建与 Release
 
-每次提交到 `main` 或 PR 自动执行：
+提交到 `main` 或创建 PR 时，GitHub Actions 自动执行：
 
-1. `ruff check`
-2. `pytest`
-3. Windows 打包
-4. 生成 Actions artifact
+1. Ruff
+2. Pytest
+3. Windows x64 打包
+4. 上传 Actions Artifact
 
-创建正式版本：
+推送 `v*` Tag 时，在以上流程成功后自动创建 GitHub Release。
+
+首个正式版本：
 
 ```bash
-git tag v0.2.0
+git tag -a v0.2.0 -m "Android Device Agent v0.2.0"
 git push origin v0.2.0
 ```
 
-自动生成：
+Release 附件名称：
 
 ```text
-android-device-agent-windows-x64.zip
+android-device-agent-v0.2.0-windows-x64.zip
 ```
 
-包含：
+ZIP 内保持稳定的程序名称：
 
 ```text
 android-device-agent.exe
@@ -194,14 +240,13 @@ android-remote-client.exe
 README.md
 ```
 
-并自动发布到 GitHub Releases。
+## 后续计划
 
-## 后续
-
-- 进一步评估 scrcpy server 原生 video/control socket 接入
-- WebSocket 控制通道
+- scrcpy server 原生 video/control socket 低延迟方案
+- WebSocket/长连接控制通道
+- 进一步降低画面编码、传输、解码延迟
+- ADB offline / USB 拔插自动恢复
 - Agent Token 鉴权
-- ADB offline / 拔插自动恢复
 - 多设备并发视频会话优化
 - APK 安装/卸载
 - push/pull 文件
