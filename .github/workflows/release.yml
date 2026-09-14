@@ -29,6 +29,8 @@ jobs:
   build-windows:
     needs: test
     runs-on: windows-latest
+    env:
+      PACKAGE_NAME: android-device-agent-${{ github.ref_name }}-windows-x64
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -47,15 +49,15 @@ jobs:
           Copy-Item dist/android-device-agent.exe package/
           Copy-Item dist/android-remote-client.exe package/
           Copy-Item README.md package/
-          Compress-Archive -Path package/* -DestinationPath android-device-agent-windows-x64.zip
+          Compress-Archive -Path package/* -DestinationPath "$env:PACKAGE_NAME.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: android-device-agent-windows-x64
-          path: android-device-agent-windows-x64.zip
+          name: ${{ env.PACKAGE_NAME }}
+          path: ${{ env.PACKAGE_NAME }}.zip
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: android-device-agent-windows-x64.zip
+          files: ${{ env.PACKAGE_NAME }}.zip
