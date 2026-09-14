@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 import av
 import requests
-from PySide6.QtCore import QPoint, QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -60,7 +60,7 @@ class VideoThread(QThread):
                                 QImage.Format.Format_RGB888,
                             ).copy()
                             self.frame_ready.emit(image)
-        except (requests.RequestException, av.AVError, OSError) as exc:
+        except (requests.RequestException, av.error.FFmpegError, OSError) as exc:
             if self._running:
                 self.stream_error.emit(str(exc))
         finally:
@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
             self.post("input/text", {"text": text})
             self.text_input.clear()
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def closeEvent(self, event) -> None:
         self.stop_video_stream()
         event.accept()
 
