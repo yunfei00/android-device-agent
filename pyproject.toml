@@ -1,6 +1,6 @@
 [project]
 name = "android-device-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "Remote Android device agent and low-latency desktop controller over ADB"
 readme = "README.md"
 requires-python = ">=3.11"
