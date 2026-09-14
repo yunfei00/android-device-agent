@@ -3,24 +3,39 @@ from __future__ import annotations
 import re
 import subprocess
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 
 class VideoStreamError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class VideoQuality:
+    max_size: int | None
+    bit_rate: int
+
+
+VIDEO_QUALITIES: dict[str, VideoQuality] = {
+    "smooth": VideoQuality(max_size=1280, bit_rate=2_500_000),
+    "balanced": VideoQuality(max_size=1600, bit_rate=4_000_000),
+    "high": VideoQuality(max_size=1920, bit_rate=6_000_000),
+    "native": VideoQuality(max_size=None, bit_rate=8_000_000),
+}
+
+
 class AdbH264Streamer:
     """Stream the Android screen as a continuous raw H.264 byte stream."""
 
-    def __init__(
-        self,
-        adb_executable: str = "adb",
-        bit_rate: int = 2_500_000,
-        max_size: int = 1280,
-    ) -> None:
+    def __init__(self, adb_executable: str = "adb") -> None:
         self.adb_executable = adb_executable
-        self.bit_rate = bit_rate
-        self.max_size = max_size
+
+    def quality(self, name: str) -> VideoQuality:
+        try:
+            return VIDEO_QUALITIES[name]
+        except KeyError as exc:
+            choices = ", ".join(VIDEO_QUALITIES)
+            raise VideoStreamError(f"unknown video quality {name!r}; choose: {choices}") from exc
 
     def _screen_size(self, serial: str) -> tuple[int, int] | None:
         try:
@@ -39,24 +54,23 @@ class AdbH264Streamer:
             return None
         return int(match.group(1)), int(match.group(2))
 
-    def _encoder_size(self, serial: str) -> tuple[int, int] | None:
+    def _encoder_size(self, serial: str, quality: VideoQuality) -> tuple[int, int] | None:
         size = self._screen_size(serial)
         if size is None:
             return None
         width, height = size
-        longest = max(width, height)
-        if longest <= self.max_size:
+        max_size = quality.max_size
+        if max_size is None or max(width, height) <= max_size:
             return width - width % 2, height - height % 2
-        scale = self.max_size / longest
+        scale = max_size / max(width, height)
         scaled_w = max(2, int(width * scale))
         scaled_h = max(2, int(height * scale))
-        # H.264 encoders commonly require even dimensions. Keeping the dimensions even
-        # avoids failures on vendor codecs while preserving the phone aspect ratio closely.
         return scaled_w - scaled_w % 2, scaled_h - scaled_h % 2
 
-    def preflight(self, serial: str) -> dict[str, object]:
+    def preflight(self, serial: str, quality_name: str = "balanced") -> dict[str, object]:
         if not serial:
             raise VideoStreamError("serial is required")
+        quality = self.quality(quality_name)
         try:
             cp = subprocess.run(
                 [self.adb_executable, "-s", serial, "shell", "screenrecord", "--help"],
@@ -70,20 +84,22 @@ class AdbH264Streamer:
         except subprocess.TimeoutExpired as exc:
             raise VideoStreamError("screenrecord capability check timed out") from exc
         output = (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
-        encoder_size = self._encoder_size(serial)
+        encoder_size = self._encoder_size(serial, quality)
         return {
             "available": cp.returncode == 0 or "screenrecord" in output.lower(),
             "h264_option_reported": "output-format" in output or "h264" in output.lower(),
+            "quality": quality_name,
             "encoder_size": f"{encoder_size[0]}x{encoder_size[1]}" if encoder_size else None,
-            "bit_rate": self.bit_rate,
+            "bit_rate": quality.bit_rate,
         }
 
-    def stream(self, serial: str) -> Iterator[bytes]:
+    def stream(self, serial: str, quality_name: str = "balanced") -> Iterator[bytes]:
         if not serial:
             raise VideoStreamError("serial is required")
+        quality = self.quality(quality_name)
 
         while True:
-            process = self._start(serial)
+            process = self._start(serial, quality)
             emitted = False
             try:
                 if process.stdout is None:
@@ -111,7 +127,7 @@ class AdbH264Streamer:
             if not emitted:
                 raise VideoStreamError("screenrecord produced no H.264 data")
 
-    def _start(self, serial: str) -> subprocess.Popen[bytes]:
+    def _start(self, serial: str, quality: VideoQuality) -> subprocess.Popen[bytes]:
         command = [
             self.adb_executable,
             "-s",
@@ -120,9 +136,9 @@ class AdbH264Streamer:
             "screenrecord",
             "--output-format=h264",
             "--bit-rate",
-            str(self.bit_rate),
+            str(quality.bit_rate),
         ]
-        encoder_size = self._encoder_size(serial)
+        encoder_size = self._encoder_size(serial, quality)
         if encoder_size is not None:
             command.extend(["--size", f"{encoder_size[0]}x{encoder_size[1]}"])
         command.append("-")
