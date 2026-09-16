@@ -186,13 +186,13 @@ async def lifespan(_app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Android Device Agent", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="Android Device Agent", version="0.4.0", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict:
         return {
             "status": "ok",
-            "version": "0.3.0",
+            "version": "0.4.0",
             "adb_available": adb.available,
             "input_mode": "persistent-adb-shell",
             "video_mode": "selectable-h264-quality-with-screenshot-fallback",
