@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import av
 import requests
-from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QPoint, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,6 +34,10 @@ RENDER_INTERVAL_MS = {
     "high": 33,
     "native": 50,
 }
+
+DEFAULT_AGENT_ENDPOINT = "http://127.0.0.1:18080"
+DEFAULT_WINDOW_WIDTH = 500
+DEFAULT_WINDOW_HEIGHT = 900
 
 
 class VideoThread(QThread):
@@ -100,7 +104,7 @@ class ScreenLabel(QLabel):
         super().__init__()
         self.owner = owner
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(360, 640)
+        self.setMinimumSize(300, 520)
         self.setStyleSheet("background:#111; color:#ddd;")
         self._press_pos: QPoint | None = None
 
@@ -143,7 +147,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Android Remote Client")
-        self.resize(720, 900)
+        self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        self.settings = QSettings("AndroidDeviceAgent", "RemoteClient")
         self.session = requests.Session()
         self.physical_device_size: tuple[int, int] | None = None
         self.video_frame_size: tuple[int, int] | None = None
@@ -156,7 +161,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         top = QHBoxLayout()
-        self.endpoint = QLineEdit("http://127.0.0.1:18080")
+        saved_endpoint = self.settings.value("agent/endpoint", DEFAULT_AGENT_ENDPOINT, type=str)
+        self.endpoint = QLineEdit(saved_endpoint or DEFAULT_AGENT_ENDPOINT)
         self.devices = QComboBox()
         refresh = QPushButton("刷新设备")
         refresh.clicked.connect(self.refresh_devices)
@@ -228,10 +234,17 @@ class MainWindow(QMainWindow):
         serial = quote(self.serial(), safe="")
         return f"{self.base()}/api/v1/devices/{serial}/{suffix}"
 
+    def remember_successful_endpoint(self) -> None:
+        endpoint = self.base()
+        if endpoint:
+            self.settings.setValue("agent/endpoint", endpoint)
+            self.settings.sync()
+
     def refresh_devices(self) -> None:
         try:
             response = self.session.get(f"{self.base()}/api/v1/devices", timeout=3)
             response.raise_for_status()
+            self.remember_successful_endpoint()
             items = response.json().get("devices", [])
             current = self.serial()
             self.stop_video_stream()
@@ -248,7 +261,7 @@ class MainWindow(QMainWindow):
                     self.devices.setCurrentIndex(idx)
             self.devices.blockSignals(False)
             self.load_device_info()
-            self.status.setText(f"发现 {len(items)} 台设备")
+            self.status.setText(f"发现 {len(items)} 台设备 | 已记住 Agent")
         except requests.RequestException as exc:
             self.status.setText(f"连接失败: {exc}")
 
@@ -261,6 +274,7 @@ class MainWindow(QMainWindow):
         try:
             response = self.session.get(self.device_url("info"), timeout=3)
             response.raise_for_status()
+            self.remember_successful_endpoint()
             info = response.json()
             size = info.get("screen_size")
             if size and "x" in size:
@@ -303,8 +317,6 @@ class MainWindow(QMainWindow):
         if thread is not None:
             thread.stop()
             if thread.isRunning() and thread not in self.retired_video_threads:
-                # Keep a strong reference until QThread really finishes. Dropping the last
-                # reference to a running QThread can make Qt terminate the whole process.
                 self.retired_video_threads.append(thread)
 
     def cleanup_video_thread(self, thread: VideoThread) -> None:
@@ -405,6 +417,8 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setOrganizationName("AndroidDeviceAgent")
+    app.setApplicationName("RemoteClient")
     window = MainWindow()
     window.show()
     window.refresh_devices()
